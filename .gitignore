@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.env
+
+# Data
+data/
+training_features.csv
+classification_results.json
+
+#Models
+models/
+
+# Secrets
+src/config.py

@@ -1,0 +1,9 @@
+pandas
+scikit-learn
+joblib
+spotipy
+pylast
+yt-dlp
+librosa
+torch
+transformers
