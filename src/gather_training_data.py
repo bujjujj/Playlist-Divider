@@ -6,41 +6,40 @@ import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import time
 
-# Make sure these imports are correct based on your file structure
-from src.feature_extraction import extract_all_features_for_song
+from src.feature_extraction import process_and_extract_features
 from src.config import SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SPOTIPY_REDIRECT_URI
 
 def gather_training_data():
     """
     A resumable script to gather training data from Spotify playlists.
+    It orchestrates the download, feature extraction, and data saving.
     """
     # --- 1. SETUP ---
     TRAINING_PLAYLISTS = {
-        'hiphop-workout': 'spotify:playlist:6nZs9qkLc2Pg6Q2iZOSgbk',
+        'rap-adjacent': 'spotify:playlist:7AYWhrfuCo9MRscfTvBEC1',
         'makeout': 'spotify:playlist:4qZs86VNq1kXaRtCE5lcSr',
         'chase': 'spotify:playlist:74s26XHRLZ716UvUj3hL4S',
-        'lofi-downtempo': 'spotify:playlist:2DRvUsr4TnWlAvFYv5B1xi', #very huge playlist, only take first 200 songs
+        'lofi-downtempo': 'spotify:playlist:2DRvUsr4TnWlAvFYv5B1xi',
         'instrumental-happy': 'spotify:playlist:3L3ChTfSqTO6QdEfCd7l0s',
-        'ambient-focus': 'spotify:playlist:70S8eB9yATWo90aQny9oGb', #very huge playlist, only take first 200 songs
-        'atmospheric-room': 'spotify:playlist:36vNl3AjU4sbCQcsQUOq3K',
-        'acoustic-guitar': 'spotify:playlist:3ru5tc8HpvzsOklw78rKnf',
+        'ambient-focus': 'spotify:playlist:70S8eB9yATWo90aQny9oGb',
+        'room': 'spotify:playlist:36vNl3AjU4sbCQcsQUOq3K',
+        'canonsburg': 'spotify:playlist:60qXIMg2QYAIjo5TQVp3mi',
         'citypop': 'spotify:playlist:5drMgosoieMPSYbq46ugqa',
-        'feel-good': 'spotify:playlist:4bY71u1Mc66zxbWSmPjBeF',
+        'upbeat': 'spotify:playlist:5hU1rIGdbFsQxftzlcGpA2', #stopped here
         'edm-club': 'spotify:playlist:2Fl0AxmDN4BPYvgZrtQSZF'
     }
-    MAX_SONGS_PER_PLAYLIST = 200
+    MAX_SONGS_PER_PLAYLIST = 150
     output_filename = 'training_features.csv'
-    processed_songs = set()
+    processed_songs_memory = set()
 
-    # --- 2. LOAD MEMORY (Previously Processed Songs) ---
-    print("Loading script memory...")
+    # --- 2. LOAD MEMORY (From previously saved CSV) ---
+    print("Loading script memory from CSV...")
     if os.path.exists(output_filename):
         try:
             df_existing = pd.read_csv(output_filename)
-            # Create a unique identifier for each song (artist, track)
             for index, row in df_existing.iterrows():
-                processed_songs.add((row['artist'], row['track']))
-            print(f"Found {len(processed_songs)} songs that have already been processed.")
+                processed_songs_memory.add((row['artist'], row['track']))
+            print(f"Found {len(processed_songs_memory)} songs with features already saved.")
         except pd.errors.EmptyDataError:
             print("Found an empty existing CSV. Starting fresh.")
     else:
@@ -64,6 +63,7 @@ def gather_training_data():
         try:
             results = sp.playlist_items(playlist_id)
             items = results['items']
+            # Continue fetching all songs from the playlist
             while results['next']:
                 results = sp.next(results)
                 items.extend(results['items'])
@@ -71,55 +71,59 @@ def gather_training_data():
             print(f"CRITICAL ERROR: Could not fetch playlist '{label}'. Skipping. Error: {e}")
             continue
 
+        # --- UPDATED: Changed from taking the first X songs to a random sample ---
         if len(items) > MAX_SONGS_PER_PLAYLIST:
             print(f"Playlist has {len(items)} songs. Taking a reproducible random sample of {MAX_SONGS_PER_PLAYLIST}.")
-            random.seed(42)
+            random.seed(42) # Use a seed for reproducible "random" sampling
             items = random.sample(items, MAX_SONGS_PER_PLAYLIST)
-        
+
         # --- Loop through each song in the playlist ---
         for item in tqdm.tqdm(items, desc=f"Processing '{label}'"):
             try:
-                track = item['track']
-                if not (track and track['artists']):
+                track = item.get('track')
+                if not (track and track.get('artists')):
                     continue
 
                 artist = track['artists'][0]['name']
                 name = track['name']
 
-                # --- THE RESUME CHECK ---
-                if (artist, name) in processed_songs:
-                    continue # Instantly skip this song
+                # --- Check against CSV memory ---
+                if (artist, name) in processed_songs_memory:
+                    continue 
 
-                # --- Main work is done here ---
-                features = extract_all_features_for_song(artist, name, label)
+                # --- DELEGATE ALL WORK TO THE WORKER FUNCTION ---
+                features = process_and_extract_features(
+                    artist=artist,
+                    title=name,
+                    playlist_label=label,
+                    keep_audio=False
+                )
                 
                 # --- INSTANT SAVE ---
                 if features:
-                    # Add identifiers for our "memory"
-                    features['artist'] = artist
-                    features['track'] = name
-                    features['label'] = label
-                    
+                    features.update({'artist': artist, 'track': name, 'label': label})
                     new_row_df = pd.DataFrame([features])
                     
-                    # Append new row to the CSV. Write header only if file is new.
                     write_header = not os.path.exists(output_filename)
-                    new_row_df.to_csv(output_filename, mode='a', header=write_header, index=False)
+                    new_row_df.to_csv(
+                        output_filename, 
+                        mode='a', 
+                        header=write_header, 
+                        index=False, 
+                        encoding='utf-8-sig'
+                    )
                     
-                    # Update our in-memory set
-                    processed_songs.add((artist, name))
+                    processed_songs_memory.add((artist, name))
                 
-                time.sleep(0.1) # Small delay to be kind to APIs
+                time.sleep(random.uniform(1.2, 2.3))
 
             except Exception as e:
-                # This will catch any unexpected error for a single song and move on
-                print(f"\nSkipping a song due to an unexpected error: {e}")
+                print(f"\nSkipping a song due to an unexpected error in the main loop: {e}")
                 continue
 
         print(f"Finished processing playlist '{label}'.")
 
-    print("\n--- All Playlists Processed ---")
-
+    print("\n--- Script Complete: All Playlists Processed ---")
 
 if __name__ == '__main__':
     gather_training_data()

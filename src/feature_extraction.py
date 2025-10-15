@@ -1,168 +1,131 @@
 import yt_dlp
+import subprocess
 import os
-import re
 import numpy as np
 import librosa
 import torch
 from transformers import AutoProcessor, AutoModelForAudioClassification
 
-processor = AutoProcessor.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
-model = AutoModelForAudioClassification.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
+# NEW: Import the official yt-dlp filename sanitizer
+from yt_dlp.utils import sanitize_filename
+from src.config import FFMPEG_PATH
 
-def download_song_as_mp3(artist, title, playlist_label, base_dir="data/audio"):
+# --- Model Loading (Done once when the script starts) ---
+print("Loading Audio Classification Model...")
+processor = AutoProcessor.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593", use_fast=True)
+model = AutoModelForAudioClassification.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
+print("Model loaded.")
+
+
+def process_and_extract_features(artist, title, playlist_label, base_dir="data/audio", keep_audio=False):
     """
-    Finds a song, sanitizes the filename, downloads it as an MP3,
-    and returns the EXACT final file path from yt-dlp.
+    This is the main worker function. It handles the entire pipeline for a single song:
+    1. Checks if the MP3 already exists (for resuming).
+    2. If not, downloads it efficiently (direct-to-MP3).
+    3. Extracts Librosa and Transformer-based features.
+    4. Deletes the MP3 file to save space (optional).
     """
-    # Create the specific subfolder for the playlist
+    # --- 1. SETUP PATHS AND TRIMMING RULES ---
     output_dir = os.path.join(base_dir, playlist_label)
     os.makedirs(output_dir, exist_ok=True)
-
-    search_query = f"ytsearch1:{artist} - {title} lyrics"
-    base_filename = f"{artist} - {title}"
-    safe_filename = re.sub(r'[\\/*?:"<>|]', "", base_filename).strip(' .')[:150]
-    output_template = os.path.join(output_dir, safe_filename)
-
-    final_mp3_path = os.path.join(output_dir, f"{safe_filename}.mp3")
-    # If a file already exists at that exact path, return the path and stop.
-    if os.path.exists(final_mp3_path):
-        return final_mp3_path
-
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'outtmpl': output_template,
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-        'keepvideo': False
-    }
-
-    try:
-        # Use extract_info to get metadata, including the final file path
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(search_query, download=True)
-            # The actual path of the post-processed file
-            final_filepath = info_dict['entries'][0]['requested_downloads'][0]['filepath']
-            
-            # If the file already existed, the path might not be in the dict, so we build it
-            if not os.path.exists(final_filepath):
-                 final_filepath = output_template + ".mp3"
-
-            return final_filepath
-            
-    except Exception as e:
-        return None
     
-def get_instrument_probabilities(audio_file_path):
-    """
-    Analyzes an audio file and returns the model's confidence for various instruments/sounds.
-    """
+    safe_title = sanitize_filename(f"{artist} - {title}")[:150]
+    final_mp3_path = os.path.join(output_dir, f"{safe_title}.mp3")
+
+    # Define which playlists should have shorter downloads
+    TRIM_PLAYLISTS = {'lofi-downtempo', 'instrumental-happy', 'ambient-focus'}
+    trim_duration = 120 if playlist_label in TRIM_PLAYLISTS else None
+    
+    # --- 2. RESUME LOGIC & EFFICIENT DOWNLOAD ---
+    if not os.path.exists(final_mp3_path):
+        print(f"\nMP3 not found for '{safe_title}'. Starting efficient download...")
+        
+        search_query = f"ytsearch1:{artist} {title}"
+        
+        # This is the direct-to-mp3 streaming logic
+        success = _download_via_stream(
+            query=search_query,
+            output_path=final_mp3_path,
+            ffmpeg_path=FFMPEG_PATH,
+            trim_duration=trim_duration
+        )
+        if not success:
+            return None # Download failed, skip this song
+    else:
+        print(f"Found existing MP3 for '{safe_title}'. Skipping download.")
+
+    # --- 3. FEATURE EXTRACTION ---
+    if os.path.exists(final_mp3_path):
+        instrument_features = _get_instrument_probabilities(final_mp3_path)
+        librosa_features = _get_librosa_features(final_mp3_path)
+        
+        # --- 4. CLEANUP ---
+        if not keep_audio:
+            try:
+                os.remove(final_mp3_path)
+            except OSError as e:
+                print(f"Error removing audio file {final_mp3_path}: {e}")
+        
+        if librosa_features and instrument_features:
+            return {**librosa_features, **instrument_features}
+            
+    return None
+
+# --- HELPER FUNCTIONS (prefixed with _ for internal use) ---
+
+def _download_via_stream(query, output_path, ffmpeg_path, trim_duration=None, trim_start=30):
+    ydl_opts = {'format': 'bestaudio/best', 'cookiefile': 'cookies.txt', 'quiet': True}
     try:
-        # Load audio file. The model expects a 16kHz sample rate.
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(query, download=False)['entries'][0]
+            audio_url = info['url']
+    except Exception as e:
+        print(f"-> yt-dlp couldn't get video info: {e}")
+        return False
+
+    ffmpeg_command = [ffmpeg_path, '-i', audio_url]
+    if trim_duration:
+        ffmpeg_command.extend(['-ss', str(trim_start), '-t', str(trim_duration)])
+    ffmpeg_command.extend(['-codec:a', 'libmp3lame', '-b:a', '192k', '-y', output_path])
+
+    try:
+        subprocess.run(ffmpeg_command, check=True, capture_output=True, text=True, encoding='utf-8')
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"-> ffmpeg conversion failed: {e.stderr}")
+        return False
+
+def _get_instrument_probabilities(audio_file_path):
+    try:
         y, sr = librosa.load(audio_file_path, sr=16000)
-
-        # Process the audio waveform
         inputs = processor(y, sampling_rate=sr, return_tensors="pt")
-
-        # Make a prediction
         with torch.no_grad():
             logits = model(**inputs).logits
-
-        # Get the top 5 predicted classes
-        predicted_class_ids = torch.topk(logits, k=5).indices.tolist()[0]
-        
-        # Apply sigmoid to logits to get probabilities
         probabilities = torch.sigmoid(logits[0])
-        
-        print(f"\n--- Top 5 Predictions for: {audio_file_path.split('/')[-1]} ---")
-        results = {}
-        for i in predicted_class_ids:
-            label = model.config.id2label[i]
-            score = probabilities[i].item()
-            results[label] = score
-            print(f"{label}: {score:.4f}")
-        
-        # This dictionary of label:probability is what you'd use as features
+        results = {model.config.id2label[i]: probabilities[i].item() for i in range(len(probabilities))}
         return results
-
     except Exception as e:
-        print(f"Could not analyze {audio_file_path}. Error: {e}")
+        print(f"-> Could not get instrument probabilities: {e}")
         return None
 
-def get_librosa_features(audio_file_path):
-    """
-    Loads an audio file and extracts a dictionary of features using librosa.
-    Analyzes the first 60 seconds for efficiency.
-    """
+def _get_librosa_features(audio_file_path):
     features = {}
     try:
-        # Load the first 60 seconds of the audio file
-        # mono=True converts the signal to mono, which is standard for most feature extraction
         y, sr = librosa.load(audio_file_path, mono=True, duration=60)
-
-        # --- RHYTHMIC FEATURES ---
-        # Tempo: The speed of the music in Beats Per Minute (BPM)
         features['tempo'] = librosa.feature.tempo(y=y, sr=sr)[0]
-
-        # --- DYNAMIC FEATURES ---
-        # Root-Mean-Square (RMS) Energy: The average loudness of the song
         rms = librosa.feature.rms(y=y)
-        features['rms_mean'] = np.mean(rms)
-        features['rms_std'] = np.std(rms) # Standard deviation of energy (how dynamic is it?)
-
-        # --- TIMBRAL/TONAL FEATURES ---
-        # Spectral Centroid: The "center of mass" of the spectrum. Correlates to "brightness".
+        features['rms_mean'], features['rms_std'] = np.mean(rms), np.std(rms)
         spec_cent = librosa.feature.spectral_centroid(y=y, sr=sr)
-        features['spectral_centroid_mean'] = np.mean(spec_cent)
-        features['spectral_centroid_std'] = np.std(spec_cent)
-
-        # Spectral Bandwidth: The width of the frequency band.
+        features['spectral_centroid_mean'], features['spectral_centroid_std'] = np.mean(spec_cent), np.std(spec_cent)
         spec_bw = librosa.feature.spectral_bandwidth(y=y, sr=sr)
-        features['spectral_bandwidth_mean'] = np.mean(spec_bw)
-        features['spectral_bandwidth_std'] = np.std(spec_bw)
-
-        # Spectral Rolloff: The frequency below which a specified percentage of the total spectral energy lies.
-        spec_rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)
-        features['spectral_rolloff_mean'] = np.mean(spec_rolloff)
-        features['spectral_rolloff_std'] = np.std(spec_rolloff)
-        
-        # Zero-Crossing Rate: The rate of sign-changes in the signal. Correlates to percussiveness.
+        features['spectral_bandwidth_mean'], features['spectral_bandwidth_std'] = np.mean(spec_bw), np.std(spec_bw)
         zcr = librosa.feature.zero_crossing_rate(y)
-        features['zero_crossing_rate_mean'] = np.mean(zcr)
-        features['zero_crossing_rate_std'] = np.std(zcr)
-
-        # Mel-Frequency Cepstral Coefficients (MFCCs): The "gold standard" for timbre.
-        # We'll take the average and standard deviation of the first 20 MFCCs.
+        features['zero_crossing_rate_mean'], features['zero_crossing_rate_std'] = np.mean(zcr), np.std(zcr)
         mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
         for i in range(20):
             features[f'mfcc_{i+1}_mean'] = np.mean(mfccs[i])
             features[f'mfcc_{i+1}_std'] = np.std(mfccs[i])
-            
         return features
-
     except Exception as e:
-        print(f"Error processing {audio_file_path} with librosa: {e}")
+        print(f"-> Error processing with librosa: {e}")
         return None
-
-# You could even combine them into one main function
-def extract_all_features_for_song(artist, title, playlist_label):
-    # 1. Download the audio
-    audio_file = download_song_as_mp3(artist, title, playlist_label)
-    
-    if audio_file and os.path.exists(audio_file):
-        # 2. Get instrument features
-        instrument_features = get_instrument_probabilities(audio_file)
-        
-        # 3. Get librosa features
-        librosa_features = get_librosa_features(audio_file)
-        
-        # 4. Combine and return them
-        all_features = {**librosa_features, **instrument_features}
-        return all_features
-        
-    return None
