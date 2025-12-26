@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Sonic Sorter Pro</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body { background-color: #121212; color: #FFFFFF; font-family: 'Segoe UI', sans-serif; padding: 30px; }
+        .container { max-width: 1100px; margin: auto; }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #282828; padding-bottom: 20px; }
+        h1 { color: #1DB954; margin: 0; }
+        .controls { background: #181818; padding: 25px; border-radius: 10px; margin: 20px 0; display: flex; gap: 20px; align-items: center; }
+        select, button { padding: 12px 20px; border-radius: 25px; border: none; font-weight: bold; cursor: pointer; }
+        select { background: #282828; color: white; flex-grow: 1; }
+        button { background: #1DB954; color: white; transition: 0.2s; }
+        button:hover { transform: scale(1.05); background: #1ed760; }
+        .btn-approve { background: #2e7d32; padding: 6px 15px; font-size: 0.8em; }
+        .btn-correct { background: #c62828; padding: 6px 15px; font-size: 0.8em; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th { text-align: left; color: #b3b3b3; padding: 15px; border-bottom: 1px solid #282828; font-size: 0.9em; }
+        td { padding: 15px; border-bottom: 1px solid #121212; background: #181818; }
+        .label-tag { background: #1DB954; padding: 4px 12px; border-radius: 15px; font-size: 0.85em; font-weight: bold; }
+        .toggle-group { display: flex; flex-direction: column; gap: 5px; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Sonic Sorter Pro</h1>
+            <div id="status">Status: Ready</div>
+        </div>
+
+        <div class="controls">
+            <div class="toggle-group">
+                <label><input type="checkbox" id="approval-mode"> Approval Mode</label>
+                <label><input type="checkbox" id="add-repeats"> Add Repeats</label>
+            </div>
+            <select id="playlist-select">
+                {% for p in playlists %}
+                    <option value="{{ p.id }}">{{ p.name }} ({{ p.total }} songs)</option>
+                {% endfor %}
+            </select>
+            <button onclick="startSorting()">Start Analysis</button>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Song</th>
+                    <th>Prediction</th>
+                    <th>Confidence</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody id="results-table"></tbody>
+        </table>
+    </div>
+
+    <script>
+        const socket = io();
+
+        function startSorting() {
+            const pid = document.getElementById('playlist-select').value;
+            const mode = document.getElementById('approval-mode').checked;
+            const repeats = document.getElementById('add-repeats').checked;
+            
+            document.getElementById('results-table').innerHTML = '';
+            document.getElementById('status').innerText = "Status: Processing...";
+            
+            socket.emit('start_classification', {
+                playlist_id: pid,
+                approval_mode: mode,
+                add_repeats: repeats
+            });
+        }
+
+        socket.on('update', function(data) {
+            const table = document.getElementById('results-table');
+            const row = table.insertRow(0);
+            const isApproval = document.getElementById('approval-mode').checked;
+
+            let actionHtml = isApproval ? 
+                `<button class="btn-approve" onclick="manualAction('${data.track_id}', '${data.label}', false, this)">Approve</button>
+                 <button class="btn-correct" onclick="correctAction('${data.track_id}', this)">Correct</button>` :
+                `<span style="color:#1DB954">✓ Added</span>`;
+
+            row.innerHTML = `
+                <td>${data.song}</td>
+                <td><span class="label-tag">${data.label}</span></td>
+                <td>${data.confidence}</td>
+                <td>${actionHtml}</td>
+            `;
+        });
+
+        function manualAction(tid, label, isCorr, btn) {
+            socket.emit('manual_action', { track_id: tid, label: label, is_correction: isCorr });
+            btn.parentElement.innerHTML = `<span style="color:#1DB954">✓ Success</span>`;
+        }
+
+        function correctAction(tid, btn) {
+            const newLabel = prompt("Enter the correct playlist name exactly:");
+            if (newLabel) manualAction(tid, newLabel, true, btn);
+        }
+
+        socket.on('status', data => document.getElementById('status').innerText = "Status: " + data.msg);
+    </script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-import yt_dlp
+""" import yt_dlp
 import subprocess
 import os
 import numpy as np
@@ -18,13 +18,13 @@ print("Model loaded.")
 
 
 def process_and_extract_features(artist, title, playlist_label, base_dir="data/audio", keep_audio=False):
-    """
-    This is the main worker function. It handles the entire pipeline for a single song:
-    1. Checks if the MP3 already exists (for resuming).
-    2. If not, downloads it efficiently (direct-to-MP3).
-    3. Extracts Librosa and Transformer-based features.
-    4. Deletes the MP3 file to save space (optional).
-    """
+    
+    #This is the main worker function. It handles the entire pipeline for a single song:
+    #1. Checks if the MP3 already exists (for resuming).
+    #2. If not, downloads it efficiently (direct-to-MP3).
+    #3. Extracts Librosa and Transformer-based features.
+    #4. Deletes the MP3 file to save space (optional).
+    
     # --- 1. SETUP PATHS AND TRIMMING RULES ---
     output_dir = os.path.join(base_dir, playlist_label)
     os.makedirs(output_dir, exist_ok=True)
@@ -128,4 +128,98 @@ def _get_librosa_features(audio_file_path):
         return features
     except Exception as e:
         print(f"-> Error processing with librosa: {e}")
+        return None """
+import yt_dlp
+import subprocess
+import os
+import numpy as np
+import librosa
+import torch
+from transformers import AutoProcessor, AutoModelForAudioClassification
+from yt_dlp.utils import sanitize_filename
+from src.config import FFMPEG_PATH
+
+# --- Model Loading (Done once) ---
+print("Loading Audio Classification Model...")
+processor = AutoProcessor.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593", use_fast=True)
+model = AutoModelForAudioClassification.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
+print("Model loaded.")
+
+def process_and_extract_features(artist, title):
+    """
+    Downloads a song and extracts full features (Librosa + AST).
+    """
+    safe_title = sanitize_filename(f"{artist} - {title}")[:150]
+    temp_path = f"temp_{safe_title}.mp3"
+    
+    # Efficient download with browser spoofing to bypass 403 blocks
+    success = _download_via_stream(f"ytsearch1:{artist} {title}", temp_path)
+    
+    if not success:
         return None
+
+    try:
+        # 1. AST Model Features (Sampling rate 16k)
+        y_ast, sr_ast = librosa.load(temp_path, sr=16000)
+        inputs = processor(y_ast, sampling_rate=sr_ast, return_tensors="pt")
+        with torch.no_grad():
+            logits = model(**inputs).logits
+        probabilities = torch.sigmoid(logits[0])
+        ast_features = {model.config.id2label[i]: probabilities[i].item() for i in range(len(probabilities))}
+
+        # 2. Full Librosa Features (Original detailed logic)
+        y, sr = librosa.load(temp_path, mono=True, duration=60)
+        lib_features = {}
+        
+        lib_features['tempo'] = librosa.feature.tempo(y=y, sr=sr)[0]
+        
+        rms = librosa.feature.rms(y=y)
+        lib_features['rms_mean'], lib_features['rms_std'] = np.mean(rms), np.std(rms)
+        
+        spec_cent = librosa.feature.spectral_centroid(y=y, sr=sr)
+        lib_features['spectral_centroid_mean'], lib_features['spectral_centroid_std'] = np.mean(spec_cent), np.std(spec_cent)
+        
+        spec_bw = librosa.feature.spectral_bandwidth(y=y, sr=sr)
+        lib_features['spectral_bandwidth_mean'], lib_features['spectral_bandwidth_std'] = np.mean(spec_bw), np.std(spec_bw)
+        
+        zcr = librosa.feature.zero_crossing_rate(y)
+        lib_features['zero_crossing_rate_mean'], lib_features['zero_crossing_rate_std'] = np.mean(zcr), np.std(zcr)
+        
+        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
+        for i in range(20):
+            lib_features[f'mfcc_{i+1}_mean'] = np.mean(mfccs[i])
+            lib_features[f'mfcc_{i+1}_std'] = np.std(mfccs[i])
+
+        # Cleanup
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+            
+        return {**lib_features, **ast_features}
+
+    except Exception as e:
+        print(f"-> Extraction error for {title}: {e}")
+        if os.path.exists(temp_path): os.remove(temp_path)
+        return None
+
+def _download_via_stream(query, output_path):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'cookiefile': 'cookies.txt',
+        'quiet': True,
+        'no_warnings': True,
+        # Browser spoofing to help prevent 403 Forbidden
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(query, download=False)['entries'][0]
+            audio_url = info['url']
+            
+            # Use FFmpeg to stream directly with a timeout
+            cmd = [FFMPEG_PATH, '-i', audio_url, '-t', '120', '-codec:a', 'libmp3lame', '-b:a', '192k', '-y', output_path]
+            subprocess.run(cmd, check=True, capture_output=True)
+            return True
+    except Exception as e:
+        if "403" in str(e):
+            print(f"-> Access Blocked (403). Refresh cookies.txt.")
+        return False
