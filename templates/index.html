@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Personal Playlist Divider</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #4A90E2;
+            --bg-glass: rgba(0, 16, 33, 0.6);
+            --border-glass: rgba(255, 255, 255, 0.1);
+            --text-main: #f0f4f8;
+            --text-muted: #a0aec0;
+        }
+
+        body {
+            margin: 0;
+            padding: 50px 20px;
+            /* Deep navy blue that undulates with lighter blue streaks via background animation */
+            background: linear-gradient(-45deg, #010a15, #021b36, #011224, #042a53);
+            background-size: 400% 400%;
+            animation: undulate 18s ease infinite;
+            color: var(--text-main);
+            font-family: 'Cormorant Garamond', serif;
+            min-height: 100vh;
+            box-sizing: border-box;
+        }
+
+        @keyframes undulate {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        .container {
+            max-width: 950px;
+            margin: auto;
+            background: var(--bg-glass);
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            border: 1px solid var(--border-glass);
+            border-radius: 12px;
+            padding: 40px;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5);
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            border-bottom: 1px solid var(--border-glass);
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            font-weight: 300;
+            font-size: 3rem;
+            margin: 0;
+            letter-spacing: 1px;
+            color: #ffffff;
+        }
+
+        #status {
+            font-family: 'DM Mono', monospace;
+            font-size: 0.95rem;
+            color: var(--primary);
+            font-weight: 300;
+        }
+
+        .controls {
+            display: flex;
+            gap: 25px;
+            align-items: center;
+            margin-bottom: 35px;
+            flex-wrap: wrap;
+        }
+
+        .toggle-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-family: 'DM Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+
+        input[type="checkbox"] {
+            accent-color: var(--primary);
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+
+        select {
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text-main);
+            border: 1px solid var(--border-glass);
+            padding: 12px 20px;
+            border-radius: 6px;
+            font-family: 'DM Mono', monospace;
+            font-size: 0.95rem;
+            flex-grow: 1;
+            cursor: pointer;
+            outline: none;
+            transition: all 0.3s ease;
+        }
+
+        select:focus {
+            border-color: var(--primary);
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        select option {
+            background: #021b36;
+            color: #fff;
+        }
+
+        button {
+            background: transparent;
+            color: var(--primary);
+            border: 1px solid var(--primary);
+            padding: 12px 35px;
+            border-radius: 6px;
+            font-family: 'DM Mono', monospace;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all 0.4s ease;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        button:hover {
+            background: var(--primary);
+            color: #010a15;
+            box-shadow: 0 0 20px rgba(74, 144, 226, 0.3);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+
+        th, td {
+            padding: 18px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-glass);
+        }
+
+        th {
+            font-family: 'DM Mono', monospace;
+            font-weight: 300;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+        }
+
+        td {
+            font-family: 'Cormorant Garamond', serif;
+            font-size: 1.4rem;
+            font-weight: 300;
+        }
+
+        .mono-cell {
+            font-family: 'DM Mono', monospace;
+            font-size: 0.95rem;
+        }
+
+        .label-tag {
+            background: rgba(74, 144, 226, 0.08);
+            color: #7ab3ef;
+            border: 1px solid rgba(74, 144, 226, 0.2);
+            padding: 6px 14px;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            font-family: 'DM Mono', monospace;
+        }
+
+        .status-success {
+            color: #4cd964;
+            font-weight: 400;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 15px;
+            }
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Sonic Sorter Pro</h1>
+            <div id="status">Status: Ready</div>
+        </div>
+
+        <div class="controls">
+            <div class="toggle-group">
+                <input type="checkbox" id="add-repeats">
+                <label for="add-repeats">Allow Duplicates</label>
+            </div>
+            <select id="playlist-select">
+                {% for p in playlists %}
+                    <option value="{{ p.id }}">{{ p.name }} ({{ p.total }} songs)</option>
+                {% endfor %}
+            </select>
+            <button onclick="startSorting()">Sort Playlist</button>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Song</th>
+                    <th>Assigned Playlist</th>
+                    <th>Confidence</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody id="results-table"></tbody>
+        </table>
+    </div>
+
+    <script>
+        const socket = io();
+
+        function startSorting() {
+            const pid = document.getElementById('playlist-select').value;
+            const repeats = document.getElementById('add-repeats').checked;
+            
+            document.getElementById('results-table').innerHTML = '';
+            document.getElementById('status').innerText = "Status: AI Sorting in Progress...";
+            
+            socket.emit('start_classification', {
+                playlist_id: pid,
+                add_repeats: repeats
+            });
+        }
+
+        socket.on('update', function(data) {
+            const table = document.getElementById('results-table');
+            const row = table.insertRow(0);
+
+            row.innerHTML = `
+                <td>${data.song}</td>
+                <td><span class="label-tag">${data.label}</span></td>
+                <td class="mono-cell">${data.confidence}</td>
+                <td class="mono-cell status-success">✓ Added</td>
+            `;
+        });
+
+        socket.on('status', data => {
+            document.getElementById('status').innerText = "Status: " + data.msg;
+        });
+    </script>
+</body>
+</html>
